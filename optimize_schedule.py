@@ -5,18 +5,30 @@ from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun
 import astropy.units as u
 import argparse
 import pandas as pd
+import matplotlib.pyplot as plt
 
-def get_intercept_unc_squared(x):
-    # assume x, y are 1D arrays (possibly containing np.nan)
+def get_intercept_unc_squared(x, x0):
     mask = np.isfinite(x)
     xv = x[mask]
 
-    n = len(xv)
-    sum_xx = sum(xv**2.)
-    sum_x = sum(xv)
+    if len(xv) <= 3:
+        return 100.
 
-    return sum_xx/(n*sum_xx - sum_x**2.)
+    if min(xv) > 1.5 or max(xv) < 1.5:
+        return 100.
 
+    jmat = np.zeros([len(xv), 3], dtype=np.float64)
+    jmat[:, 0] = 1.
+    jmat[:, 1] = xv - x0
+    jmat[:, 2] = np.abs(xv - 1.5) - np.abs(x0 - 1.5)
+
+    Wmat = np.dot(jmat.T, jmat)
+    Cmat = np.linalg.inv(Wmat)
+    assert len(Cmat) == 3
+    return Cmat[0,0]
+
+def angle_diff(a, b):
+    return (b - a + 180) % 360 - 180
 
 def get_airmass(target, t_mid):
     altaz_frame = AltAz(location=maunakea, obstime=t_mid,
@@ -26,9 +38,12 @@ def get_airmass(target, t_mid):
     
     altaz = target.transform_to(altaz_frame)
     airmass_secz = altaz.secz.value
+    az = altaz.az.to(u.deg).value
+
+    az = np.where(altaz.alt < 25*u.deg, 0.0, az)
     airmass = np.where(altaz.alt < 25*u.deg, np.inf, airmass_secz)
     #airmass = np.where(airmass < args.airmass_max, np.inf, airmass)
-    return float(airmass)
+    return float(airmass), float(az)
 
 
 def fitness(sequence, verbose = False):
@@ -36,9 +51,15 @@ def fitness(sequence, verbose = False):
         print(sequence)
 
     t_boundaries = [Time(args.start, scale="utc")]
+    NA, last_az = get_airmass(target_list[sequence[0]], t_boundaries[0])
     
     for star_id in sequence:
-        t_boundaries.append(t_boundaries[-1] + all_targets["service_s"][star_id]*u.second + args.overhead*u.hour)
+        NA, this_az = get_airmass(target_list[star_id], t_boundaries[-1] + all_targets["service_s"][star_id]*u.second)
+        dome_rotate = angle_diff(last_az, this_az)
+        if verbose:
+            print("last_az, this_az", last_az, this_az, "dome_rotate", dome_rotate)
+        t_boundaries.append(t_boundaries[-1] + all_targets["service_s"][star_id]*u.second + args.overhead*u.hour + (dome_rotate/args.dome_rate)*u.second)
+        last_az = this_az
     if verbose:
         print("t_boundaries", t_boundaries)
 
@@ -57,9 +78,13 @@ def fitness(sequence, verbose = False):
     #sun_altaz = get_sun(t).transform_to(altaz)
 
     airmasses = []
+    
     for i in range(len(sequence)):
-        airmasses.append(get_airmass(target_list[sequence[i]], t_mids[i]))
+        tmp_airmass, tmp_az = get_airmass(target_list[sequence[i]], t_mids[i])
+        airmasses.append(tmp_airmass)
+        
     airmasses = np.array(airmasses)
+
     if verbose:
         print("airmasses", airmasses)
 
@@ -71,15 +96,50 @@ def fitness(sequence, verbose = False):
             standards_mask.append(0)
             
     standards_inds = np.where(np.array(standards_mask))
+
+    if verbose:
+        labeled = []
+        
+        for i in range(len(sequence)):
+            if all_targets["kind"][sequence[i]] == "standard":
+                plt.plot(i, airmasses[i], '*', color = 'b', label = "Standards"*(labeled.count("Standards") == 0))
+                labeled.append("Standards")
+            else:
+                plt.plot(i, airmasses[i], 'o', color = 'r', label = "Targets"*(labeled.count("Targets") == 0))
+                plt.text(i, airmasses[i], all_targets["id"][sequence[i]], size = 8)
+                labeled.append("Targets")
+
+        plt.legend(loc = 'best')
+        plt.xlabel("Sequence")
+        plt.ylabel("Airmass")
+        plt.savefig("airmass_seqence.pdf", bbox_inches = 'tight')
+        plt.close()
+        
     
-    total_score = 0.
+    total_score_by_target = {}
     for i in range(len(sequence)):
         if all_targets["kind"][sequence[i]] == "science" and airmasses[i] < args.airmass_max:
             
-            unc_squared = get_intercept_unc_squared(airmasses[standards_inds] - airmasses[i])
+            unc_squared = get_intercept_unc_squared(airmasses[standards_inds], airmasses[i])
             unc_squared = 1. + unc_squared # Floor of 1
-            total_score += 1./unc_squared
+            
+            if sequence[i] in total_score_by_target:
+                total_score_by_target[sequence[i]].append(1./unc_squared)
+            else:
+                total_score_by_target[sequence[i]] = [1./unc_squared]
+
+    total_score = 0.
+    for key in total_score_by_target:
+        total_score += sum(total_score_by_target[key]) / np.sqrt(len(total_score_by_target[key]))
+
+
+    total_score -= sum(airmasses > args.airmass_max)
+    total_score -= sum(np.isnan(airmasses))
+    total_score -= sum(np.isinf(airmasses))
+    
     print("total_score", total_score)
+
+    
     return total_score
 
 
@@ -95,7 +155,8 @@ ap.add_argument('--site-lon', type=float, default=-155.47)
 ap.add_argument('--site-elev-m', type=float, default=4205.)
 ap.add_argument('--dt-min', type=int, default=2, help='time-grid cadence (minutes)')
 ap.add_argument('--airmass-max', type=float, default=2.5)
-ap.add_argument('--overhead', type=float, default=0.15, help = 'overhead in hours')
+ap.add_argument('--overhead', type=float, default=0.10, help = 'overhead in hours, not counting dome rotation')
+ap.add_argument('--dome-rate', type=float, default=0.5, help = 'dome rotation in degrees per second')
 
 args = ap.parse_args()
 
