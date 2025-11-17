@@ -72,6 +72,18 @@ def fitness(sequence, verbose = False):
     sequence = np.array(sequence)[:len(t_mids)]
 
 
+    if verbose:
+        f_sched = open("schedule.txt", 'w')
+        for seq_ind, star_ind in enumerate(sequence):
+            f_sched.write('%s  { type => "Generic", start => "%s UTC", end => "%s UTC", exp => %s, nexp => 1 }\n'
+                          % (all_targets["id"][star_ind],
+                             (t_boundaries[seq_ind] - 1*u.hour).strftime('%Y-%m-%d %H:%M'),
+                             (t_boundaries[seq_ind] + 1*u.hour).strftime('%Y-%m-%d %H:%M'), all_targets["service_s"][star_ind])
+                          )
+        f_sched.close()
+
+
+
     #print("t_boundaries", t_boundaries, "sequence", sequence, len(sequence))
     #print("t_mids", t_mids)
 
@@ -205,3 +217,5 @@ print("best_seq, best_score", best_seq, best_score)
 fitness(best_seq, verbose=True)
 for star_ind in best_seq:
     print("observe", all_targets["id"][star_ind])
+
+
