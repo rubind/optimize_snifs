@@ -73,7 +73,7 @@ def fitness(sequence, verbose = False):
 
 
     if verbose:
-        f_sched = open("schedule.txt", 'w')
+        f_sched = open("tlist.%s.txt" % Time(args.start, scale="utc").strftime("%Y%m%d"), 'w')
         for seq_ind, star_ind in enumerate(sequence):
             f_sched.write('%s  { type => "Generic", start => "%s UTC", end => "%s UTC", exp => %s, nexp => 1 }\n'
                           % (all_targets["id"][star_ind],
